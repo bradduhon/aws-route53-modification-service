@@ -1,0 +1,510 @@
+Transform: 'AWS::Serverless-2016-10-31'
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 30
+    Tracing: Active
+    Environment:
+      Variables:
+        LOG_LEVEL: DEBUG
+        POWERTOOLS_LOGGER_SAMPLE_RATE: 0.1
+        POWERTOOLS_LOGGER_LOG_EVENT: true
+        POWERTOOLS_METRICS_NAMESPACE: !Ref MetricNamespace
+        POWERTOOLS_SERVICE_NAME: !Ref ServiceName
+    MemorySize: 128
+Parameters:
+  AwsAcmCertificateArn:
+    Type: String
+  APICustomDomainName:
+    Type: String
+  MetricNamespace:
+    Type: String
+  ServiceName:
+    Type: String
+    Default: "Route53ModificationRequestService"
+  AWSAccountsAllowedAccess:
+    Type: CommaDelimitedList
+  Route53ChangeApprovalEmailTargets:
+    Type: CommaDelimitedList
+Resources:
+  S3Route53Requests:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: 'Private'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+  S3Route53RequestsPolicy:
+    Type: 'AWS::S3::BucketPolicy'
+    Properties:
+      Bucket: !Ref S3Route53Requests
+      PolicyDocument:
+        Statement:
+          - Sid: WritingRoute53RequestsToBucket
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt LambdaSMFetchRoute53RequestRole.Arn
+            Action: s3:PutObject
+            Resource: !Sub 'arn:aws:s3:::${S3Route53Requests}/requests/*'
+          - Sid: ReadingRoute53RequestsFromBucket
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub "arn:aws:iam::${AWS::AccountId}:root"
+                - !GetAtt LambdaSMFetchRoute53RequestRole.Arn
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${S3Route53Requests}/requests/*"
+  CloudWatchLogGroupAPIGateway:
+    Type: AWS::Logs::LogGroup
+    Properties: 
+      LogGroupName: !Sub '/apigateway/${ServiceName}/logs'
+      RetentionInDays: 60
+  BackendApiGateway:
+    Type: 'AWS::Serverless::Api'
+    Properties:
+      TracingEnabled: true
+      Cors:
+        AllowHeaders: "'*'"
+        AllowOrigin: "'*'"
+      AccessLogSetting:
+        DestinationArn: !GetAtt CloudWatchLogGroupAPIGateway.Arn
+        Format: '{ "requestId":"$context.requestId", "ip": "$context.identity.sourceIp", "caller":"$context.identity.caller", "user":"$context.identity.user","requestTime":"$context.requestTime", "httpMethod":"$context.httpMethod","resourcePath":"$context.resourcePath", "status":"$context.status","protocol":"$context.protocol", "responseLength":"$context.responseLength" }'
+      Auth:
+        ResourcePolicy:
+          CustomStatements:
+            - Effect: "Allow"
+              Principal:
+                AWS: !Ref AWSAccountsAllowedAccess
+              Action: "execute-api:Invoke"
+              Resource: 
+                - "execute-api:/*/*/*"
+            - Effect: "Allow"
+              Principal: "*"
+              Action: "execute-api:Invoke"
+              Resource: 
+                - "execute-api:/*/GET/route53/response"
+      StageName: Default
+      Domain:
+        CertificateArn: !Ref AwsAcmCertificateArn
+        DomainName: !Ref APICustomDomainName
+        EndpointConfiguration: EDGE
+        SecurityPolicy: TLS_1_2
+      DefinitionBody:
+        Fn::Transform:
+          Name: "AWS::Include"
+          Parameters:
+            Location: swagger.yaml
+  ApiGatewayLoggingRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - "apigateway.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+  ApiGatewayAccountConfig:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLoggingRole.Arn
+      
+  LambdaCustomResourceCreateSNSSubscriptions:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: cr_create_sns_subscriptions.handler
+      Environment:
+        Variables:
+          ApproverEmails: !Join [",", !Ref Route53ChangeApprovalEmailTargets]
+          ApproversTopicArn: !GetAtt SNSRoute53ChangeApprovalTopic.TopicArn
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "sns:Subscribe"
+                - "sns:Unsubscribe"
+                - "sns:ListSubscriptions"
+              Resource: !GetAtt SNSRoute53ChangeApprovalTopic.TopicArn
+            - Effect: Allow
+              Action:
+                - "sns:ListSubscriptions"
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - "eecute-api:Invoke"
+              Resource: "*"
+  LambdaEndpointRoute53ApprovalTokens:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: ep_route53_tokens.handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - states:SendTaskSuccess
+                - states:SendTaskFailure
+              Resource:
+                - !Ref StateMachineRequestApprovals
+      Events:
+        Route53RequestApprovals:
+          Type: Api
+          Properties:
+            Path: /route53/response
+            Method: get
+            RestApiId: !Ref BackendApiGateway
+
+  LambdaEndpointDocumentation:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: ep_documentation.handler
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub 'arn:aws:s3:::${S3Route53Requests}/docs/*'
+      Events:
+        Route53Request:
+          Type: Api
+          Properties:
+            Path: /docs
+            Method: get
+            RestApiId: !Ref BackendApiGateway
+  LambdaEndpointRoute53Request:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: ep_route53_receive_request.handler
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref S3Route53Requests
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref ConfigurationAccountScoping
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - route53:ListHostedZones
+              Resource: "*"
+            - Sid: WritingRoute53RequestsFromBucket
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${S3Route53Requests}/requests/*"
+      Environment:
+        Variables:
+          RequestsBucket: !Ref S3Route53Requests
+          Configuration: !Ref ConfigurationAccountScoping
+      Events:
+        Route53Request:
+          Type: Api
+          Properties:
+            Path: /route53
+            Method: post
+            RestApiId: !Ref BackendApiGateway
+        Route53DeleteRequest:
+          Type: Api
+          Properties:
+            Path: /route53/request
+            Method: delete
+            RestApiId: !Ref BackendApiGateway
+        Route53GetRequest:
+          Type: Api
+          Properties:
+            Path: /route53/request
+            Method: get
+            RestApiId: !Ref BackendApiGateway
+  LambdaSMFetchRoute53Request:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: sm_fetch_route53_request.handler
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref S3Route53Requests
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub 'arn:aws:s3:::${S3Route53Requests}/requests/*'
+  LambdaSMGetApproversList:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: sm_get_approvers_list.handler
+      Environment:
+        Variables:
+          ApproverEmails: !Join [",", !Ref Route53ChangeApprovalEmailTargets]
+  LambdaSMSendRequestForApproval:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: sm_send_request_for_approval.handler
+      Environment:
+        Variables:
+          ApproversTopicArn: !GetAtt SNSRoute53ChangeApprovalTopic.TopicArn
+          ApproversReturnURL: !Join ['', [!Ref APICustomDomainName, '/route53/response' ]]
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt SNSRoute53ChangeApprovalTopic.TopicName
+  LambdaSMEvaluateApprovals:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: sm_evaluate_approvals.handler
+  LambdaSMExecuteRoute53Change:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: sm_execute_route53_change.handler
+      Policies:
+        - Route53ChangeResourceRecordSetsPolicy:
+            HostedZoneId: "*"
+  StateMachineRequestApprovals:
+    DependsOn:
+      - StateMachineRole
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Definition:
+        StartAt: FetchRoute53Request
+        States:
+          FetchRoute53Request:
+            Type: Task
+            InputPath: $
+            Resource:
+              Fn::GetAtt: LambdaSMFetchRoute53Request.Arn
+            Parameters:
+              detail.$: $.detail
+              execution.$: $$.Execution.Name
+              stateName.$: $$.State.Name
+            ResultPath: $
+            Next: GetApproversList
+            Retry:
+              - ErrorEquals:
+                  - States.All
+                IntervalSeconds: 60
+                MaxAttempts: 5
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.All
+                Next: InternalProcessError
+                ResultPath: $.Error.Route53Request
+          GetApproversList:
+            Type: Task
+            InputPath: $
+            Resource:
+              Fn::GetAtt: LambdaSMGetApproversList.Arn
+            # This is a common theme for each Step, while to could be removed and leverage simply
+            # the InputPath value, I can't find a way to inject stateName without this method.
+            # stateName is not currently required for this StepFunction and can safely be removed
+            # however I have found it useful to have in the past and cannot promise future changes
+            # will not require it.
+            Parameters: 
+              execution.$: $$.Execution.Name
+              stateName.$: $$.State.Name
+              request.$: $.request
+            ResultPath: $.Approvers
+            Next: SendApprovalRequestMap
+            Retry:
+              - ErrorEquals:
+                  - States.All
+                IntervalSeconds: 60
+                MaxAttempts: 5
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.All
+                Next: InternalProcessError
+                ResultPath: $.Error.GetApproversList
+          SendApprovalRequestMap:
+            Type: Map
+            InputPath: $
+            ItemsPath: $.Approvers
+            ResultPath: $.Approvals.Status
+            Parameters:
+              approver.$: $$.Map.Item.Value
+              execution.$: $.execution
+              stateName.$: $$.State.Name
+              request.$: $.request
+            Next: EvaluateApprovals
+            # Parameters:
+            Iterator:
+              StartAt: SendRequestForApproval
+              States:
+                SendRequestForApproval:
+                  Type: Task
+                  InputPath: $
+                  TimeoutSeconds: 300
+                  Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+                  ResultPath: $
+                  Parameters:
+                    FunctionName: !GetAtt LambdaSMSendRequestForApproval.Arn
+                    Payload:
+                      taskToken.$: $$.Task.Token
+                      approver.$: $.approver
+                      execution.$: $.execution
+                      stateName.$: $$.State.Name
+                      request.$: $.request
+                    
+                  End: true
+                  Retry:
+                    - ErrorEquals:
+                        - States.All
+                      IntervalSeconds: 60
+                      MaxAttempts: 5
+                      BackoffRate: 2
+                  Catch:
+                    - ErrorEquals:
+                        - States.All
+                      Next: ApprovalProcessError
+                      ResultPath: $.Error.GetApproversList
+                ApprovalProcessError:
+                  Type: Fail
+                  Cause: One or more of the States has encountered an issue.
+                  Error: ApprovalProcessError
+          EvaluateApprovals:
+            Type: Task
+            InputPath: $
+            Resource:
+              Fn::GetAtt: LambdaSMEvaluateApprovals.Arn
+            ResultPath: $.ApprovalEvaluation
+            Next: ExecuteOrDenyChangeChoice
+            Retry:
+              - ErrorEquals:
+                  - States.All
+                IntervalSeconds: 60
+                MaxAttempts: 5
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.All
+                Next: InternalProcessError
+                ResultPath: $.Error.GetApproversList
+          ExecuteOrDenyChangeChoice:
+            Type: Choice
+            Choices:
+              - Variable: $.ApprovalEvaluation
+                StringEquals: "Approved"
+                Next: ExecuteRoute53Change
+              - Variable: $.ApprovalEvaluation
+                StringEquals: "Rejected"
+                Next: Route53ChangeDenied
+          ExecuteRoute53Change:
+            Type: Task
+            InputPath: $
+            Resource:
+              Fn::GetAtt: LambdaSMExecuteRoute53Change.Arn
+            Parameters: 
+              execution.$: $$.Execution.Name
+              stateName.$: $$.State.Name
+              request.$: $.request
+            ResultPath: $.Route53ChangeResults
+            Next: Finished
+            Retry:
+              - ErrorEquals:
+                  - States.All
+                IntervalSeconds: 60
+                MaxAttempts: 5
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.All
+                Next: InternalProcessError
+                ResultPath: $.Error.GetApproversList
+          Finished:
+            Type: Succeed
+          Route53ChangeDenied:
+            Type: Fail
+            Cause: One or more of the approvers has denied this request.
+            Error: Route53ChangeDenied
+          InternalProcessError:
+            Type: Fail
+            Cause: One or more of the States has encountered an issue.
+            Error: InternalProcessError
+        
+      # DefinitionUri:
+      #   Fn::Transform:
+      #     Name: "AWS::Include"
+      #     Parameters:
+      #       Location: statemachine.yaml
+      Role: !GetAtt StateMachineRole.Arn
+      Events:
+        StartStateMachine:
+          Type: EventBridgeRule
+          Properties:
+            # InputPath: String
+            Pattern:
+              detail-type: ["Object Created"]
+              source: ["aws.s3"]
+              resources:
+                - !Sub "arn:aws:s3:::${S3Route53Requests}"
+        
+  StateMachineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: 'Allow'
+            Principal:
+              Service:
+                - "states.amazonaws.com"
+            Action:
+              - sts:AssumeRole
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:*"
+              StringEquals:
+                aws:SourceAccount: !Sub ${AWS::AccountId}
+      Path: /
+      Policies:
+        - PolicyName: 'root'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: 'Allow'
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource:
+                  - !GetAtt LambdaSMFetchRoute53Request.Arn
+                  - !GetAtt LambdaSMGetApproversList.Arn
+                  - !GetAtt LambdaSMSendRequestForApproval.Arn
+                  - !GetAtt LambdaSMEvaluateApprovals.Arn
+                  - !GetAtt LambdaSMExecuteRoute53Change.Arn
+  CustomResourceSNSDynamicApproverSubscriptions:
+    Type: 'Custom::DynamicSNSApproverSubscriptions'
+    Properties:
+      ServiceToken: !GetAtt LambdaCustomResourceCreateSNSSubscriptions.Arn
+  SNSRoute53ChangeApprovalTopic:
+    Type: AWS::SNS::Topic
+  
+  ConfigurationAccountScoping: # Allows for further scoping to specify what account_ids are allowed to make requests to specific hosted zones
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      SecretString: "{\"<account_id>\": [\"<hosted_zone_id_or_name>\"]}"
+  
+
+
+# TODO: Build Lambdas

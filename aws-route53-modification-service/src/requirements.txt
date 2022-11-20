@@ -1,0 +1,3 @@
+aws_lambda_powertools
+requests_aws4auth
+aws_xray_sdk

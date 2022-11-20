@@ -1,0 +1,16 @@
+test-profile:
+  data:
+    record-request:
+      hosted_zone_domain_name: ""
+      record:
+        # is_alias: false # Not yet supported
+        subdomain: ""
+        region: "us-east-1"
+        value: ""
+        ttl: ""
+        record_type: "A"
+  infrastructure:
+    api-gateway-endpoint: ""
+    aws-credentials-profile: ""
+    aws-region: "us-east-1"
+

@@ -1,0 +1,180 @@
+swagger: "2.0"
+info:
+  title: Route53-Modification-Service
+  version: "1"
+schemes:
+  - https
+x-amazon-apigateway-request-validators:
+  basic:
+    validateRequestBody: true
+    validateRequestParameters: true
+x-defaultMethodResponses: &defaultMethodResponses
+  "400":
+    description: "Bad Request"
+    schema:
+      $ref: "#/definitions/Error"
+  "403":
+    description: "403 Forbidden"
+    schema:
+      $ref: "#/definitions/Error"
+  "404":
+    description: "404 Not Found"
+    schema:
+      $ref: "#/definitions/Error"
+  "500":
+    description: "Internal Server Error"
+    schema:
+      $ref: "#/definitions/Error"
+securityDefinitions:
+  sigv4:
+    type: "apiKey"
+    name: "Authorization"
+    in: "header"
+    x-amazon-apigateway-authtype: "awsSigv4"
+definitions:
+  Empty:
+    type: "object"
+    title: "Empty Schema"
+  Error:
+    type: "object"
+    properties:
+      message:
+        type: "string"
+  Route53Request:
+    type: "object"
+    title: Route53 Request
+    required:
+      - record
+      - hosted_zone_domain_name
+    properties:
+      hosted_zone_domain_name:
+        type: "string"
+      record:
+        type: "object"
+        required:
+          - subdomain
+          - record_type
+          - value
+          - region
+        properties:
+          subdomain:
+            type: "string"
+          record_type:
+            type: "string"
+            enum: ["A", "CNAME"]
+          value:
+            type: "string"
+          region:
+            type: "string"
+            enum: ["us-east-1", "us-west-1", "us-east-2", "us-west-2"]
+          ttl:
+            type: "string"
+          is_alias:
+            type: "boolean"
+  RequestReceived:
+    type: "object"
+    title: "Request Received"
+    required:
+      - request_id
+      - timestamp
+    properties:
+      request_id:
+        type: "string"
+      timestampe:
+        type: "string"
+paths:
+  /route53:
+    post:
+      summary: Creates a request to add a route53 hosted zone entry.
+      operationId: Route53
+      parameters:
+        - in: "body"
+          name: "Route53Request"
+          schema:
+            $ref: '#/definitions/Route53Request'
+          required: true
+      x-amazon-apigateway-request-validator: basic
+      security:
+        - sigv4: []
+      responses:
+        "200":
+          description: OK
+          <<: *defaultMethodResponses
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        passthroughBehavior: "never"
+        uri:
+          Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaEndpointRoute53Request.Arn}/invocations"
+  # /route53/request:
+  #   delete:
+  #     summary: Deletes a request to add a route53 hosted zone entry if it has not been approved yet.
+  #     operationId: Route53
+  #     x-amazon-apigateway-request-validator: basic
+  #     parameters:
+  #       - in: "query"
+  #         name: "change_id"
+  #         schema:
+  #           type: "string"
+  #         required: true
+  #     security:
+  #       - sigv4: []
+  #     responses:
+  #       "200":
+  #         description: OK
+  #         <<: *defaultMethodResponses
+  #     x-amazon-apigateway-integration:
+  #       type: "aws_proxy"
+  #       httpMethod: "POST"
+  #       passthroughBehavior: "never"
+  #       uri:
+  #         Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaEndpointRoute53Request.Arn}/invocations"
+  #   get:
+  #     summary: Gets the details of a request to add a route53 hosted zone entry.
+  #     operationId: Route53
+  #     x-amazon-apigateway-request-validator: basic
+  #     parameters:
+  #       - in: "query"
+  #         name: "change_id"
+  #         schema:
+  #           type: "string"
+  #         required: true
+  #     security:
+  #       - sigv4: []
+  #     responses:
+  #       "200":
+  #         description: OK
+  #         <<: *defaultMethodResponses
+  #     x-amazon-apigateway-integration:
+  #       type: "aws_proxy"
+  #       httpMethod: "POST"
+  #       passthroughBehavior: "never"
+  #       uri:
+  #         Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaEndpointDocumentation.Arn}/invocations"
+  /route53/response:
+    get:
+      summary: Submits an approval to the state machine process.
+      operationId: Route53 Tokens
+      x-amazon-apigateway-request-validator: basic
+      parameters:
+        - in: "query"
+          name: "token"
+          schema:
+            type: "string"
+          required: true
+        - in: "query"
+          name: "decision"
+          schema:
+            type: "string"
+            enum: ["approved", "rejected"]
+          required: true
+      responses:
+        "200":
+          description: OK
+          <<: *defaultMethodResponses
+      x-amazon-apigateway-integration:
+        type: "aws_proxy"
+        httpMethod: "POST"
+        passthroughBehavior: "never"
+        uri:
+          Fn::Sub: "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaEndpointRoute53ApprovalTokens.Arn}/invocations"
