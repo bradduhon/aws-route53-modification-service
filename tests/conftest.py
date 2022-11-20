@@ -8,8 +8,7 @@ import os
 def configuration(request):
     dir_path = os.path.dirname(os.path.realpath(__file__))
     
-    with open(f"{dir_path}/test_data.yaml") as f:
+    with open(f"{dir_path}/local_data.yaml") as f:
         data = yaml.safe_load(f)
     
     return data.get("test-profile")
-    
