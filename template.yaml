@@ -377,9 +377,19 @@ Resources:
                       BackoffRate: 2
                   Catch:
                     - ErrorEquals:
+                      - States.Timeout
+                      Next: RejectProxy
+                      ResultPath: $.Error.GetApproversList
+                    - ErrorEquals:
                         - States.All
                       Next: ApprovalProcessError
                       ResultPath: $.Error.GetApproversList
+                RejectProxy:
+                  Type: Pass
+                  ResultPath: $
+                  Results:
+                    decision: "rejected"
+                  Next: End
                 ApprovalProcessError:
                   Type: Fail
                   Cause: One or more of the States has encountered an issue.

@@ -3,3 +3,5 @@ samconfig.toml
 *.pytest_cache
 local_data.yaml
 __pycache__*
+.pre-commit-config.yaml
+custom-pre-commit.py

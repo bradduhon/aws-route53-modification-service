@@ -26,3 +26,25 @@ This code base is functional but still in development for feature refinement and
 > ## Route53ChangeApprovalEmailTargets
 > A CommaDeliminatedList of Email Addresses that you wish to send verification notifications to for each Route53 request.
 
+# Configuration File
+There is a "configuration JSON structure" that exists in secrets manager when the template is created. This file is used to scope down access to Hosted Zones if an AWS account owns / governs more than one Hosten Zone in question. It is fairly basic and allows you to create an entry similar to the below:
+
+```json
+{
+    "<AWS_Account_Id>": [
+        "<AWS_Hosted_Zone_Name>",
+        "<AWS_Hosted_Zone_Id>"
+    ]
+}
+```
+
+What this does is allows the AWS account specified only to submit requests for the Hosted Zone Names or Ids within the list.
+
+# Caveats
+
+## Time Constrain - Five Minutes
+> ### Description:
+>The current design requires that an owner of an approver email address respond to the request within five minutes or it will cound as a rejection.
+>
+>### Rationale:
+>This service was primarily designed to solve a Route53 switching issue I was bumping into when trying to leverage a Domain governed by another AWS account I owned. The timeout for CloudFormation was often much faster than I could switch accounts and alter the records. I didn't want to expand my risk surface of allowing account B to freely modify Hosted Zones in Account A and so I came up with this solution. Since CloudFormation can have short DNS Validation windows I have reduced the approval window in this service as well.
